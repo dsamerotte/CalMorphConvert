@@ -1,17 +1,50 @@
 #!/usr/bin/env bash
 
-DIR=/Volumes/X2/test
+DIR=/Volumes/X2/KS_130826_MArep3
 NUM_FIELDS=40
 NUM_CHANNELS=2
-CSV_FILE='test.csv'
+CSV_FILE='/Volumes/X2/plateID_384.csv'
 NUM_WELLS=384
 
-# Filename Options
-FILE_PREFIX='xy'
-FILE_ZERO_PADDING=5
-FILE_CHANNEL_SEP='c'
-FILE_TIF_EXT='tif'
-FILE_JPEG_EXT='jpeg'
+# Input File Options
+IN_FILENAME_PREFIX='xy'
+IN_FILENAME_ZERO_PADDING=5 # Number of total digits, padded with 0s (switch to calculating)
+IN_FILENAME_CHANNEL_SEP='c'
+IN_FILENAME_EXT='tif' # must be an image type
+IN_IMG_WIDTH=2560
+IN_IMG_HEIGHT=2160
+
+# Output File Options
+OUT_FILENAME_PREFIX='' # e.g., '1_'
+OUT_FILENAME_SUFFIX='' # e.g., 'proc'
+OUT_FILENAME_CHANNEL=([1]=C [2]=D) # array mapping a channel to its CalMorph symbol
+OUT_FILENAME_EXT='jpg' # must be an image type
+OUT_IMG_WIDTH=696
+OUT_IMG_HEIGHT=520
+OUT_IMG_DEPTH=8
+
+# Output Directory Options
+OUT_DIR_PREFIX='' # e.g., '1_'
+OUT_DIR_SUFFIX='' # e.g., 'proc'
+
+# ImageMagick Options
+IM_APP="convert"
+IM_CONTRAST="-auto-level"
+IM_DEPTH="-depth $OUT_IMG_DEPTH"
+# We need to shave some pixels off the top and bottom to be able to evenly
+# divide it up. (We prefer shaving the edges.)
+# Some dark magick, but note that bash does int div and will truncate
+IM_SHAVE="-shave 0x$(( (IN_IMG_HEIGHT - IN_IMG_HEIGHT/OUT_IMG_WIDTH * OUT_IMG_WIDTH)/2 ))"
+IM_CROP="-crop 5x3+10+0@ +repage +adjoin"
+IM_ROTATE="-rotate 90"
+IM_ALL_COMMANDS="$IM_CONTRAST $IM_DEPTH $IM_SHAVE $IM_CROP $IM_ROTATE"
+IM_OUTPUT_FILE="test_5x3_ad_1_%02d.$OUT_FILENAME_EXT"
+
+# TO DO
+#overlap=10
+# Add code to determine the padding
+# Do line conversion automatically
+# Fix ugly IM code and calculate tiling automatically
 
 # Default to 384 well plates
 NUM_ROWS=16
@@ -23,22 +56,12 @@ fi
 
 # Optionally take rows and cols on command line
 
-# Check for libtiff and instruct otherwise
-
-# Check for sip and instruct otherwise
+# Check for imagemagick and instruct otherwise
+# brew install imagemagic --with-libtiff
 
 # Read the .csv file into an array, first skipping the header row
-# and then grabbing the 3rd column of the file.
+# and then grabbing the 3rd column.
 genotypes=( $(tail -n+2 $CSV_FILE | cut -d ',' -f3 ) )
-
-# Helper function to 
-genotype_index () {
-  return $(($NUM_COLS * $1 + $2))
-}
-
-# Stop doing this: just construct the file name directly
-# Read all files into an array
-#files=($DIR/*.$FILE_EXT)
 
 # Iterate through every well by row and col
 for (( row=0; row < $NUM_ROWS; row++ ))
@@ -49,6 +72,12 @@ do
     # mapping [row][col] to an index in our 1d array
     genotype_index=$((NUM_COLS * row + col))
     genotype=${genotypes[$genotype_index]}
+    
+    # Create an output directory if not already present
+    out_dir="$DIR/$OUT_DIR_PREFIX$genotype$OUT_DIR_SUFFIX"
+    if [ ! -d "$out_dir" ]; then
+      mkdir "$out_dir"
+    fi
 
     # Map a row, col, field, and channel to a file.
     # This is a bit strange as the microscope processes the first column
@@ -90,8 +119,6 @@ do
     # Note: We do not include NUM_CHANNELS here as we're constructing
     #       the filename, and the channel is just appended.
     num_prev_files=$(( num_wells*NUM_FIELDS ))
-    echo "wells: $num_wells"
-    echo "genotype: $genotype"
     	
     # Further iterate through every field and channel for that well
     for (( field=1; field <= $NUM_FIELDS; field++ ))
@@ -99,17 +126,27 @@ do
       # Construct the filename's base now since it's not dependent on the channel.
       # See http://wiki.bash-hackers.org/commands/builtin/printf#modifiers
       # for documentation on printf formatting.
-      printf -v basename "%s%0*d%s" $FILE_PREFIX $FILE_ZERO_PADDING \
-          $(( num_prev_files + field )) $FILE_CHANNEL_SEP
+      printf -v in_basename "%s%0*d%s" $IN_FILENAME_PREFIX $IN_FILENAME_ZERO_PADDING \
+          $(( num_prev_files + field )) $IN_FILENAME_CHANNEL_SEP
       
       for (( channel=1; channel <= $NUM_CHANNELS; channel++ ))
       do
         # Append the channel number to get the full filename (-extension)
-    	  filename=$basename$channel
-      	echo "filename: $filename"
+    	  in_filename=$in_basename$channel.$IN_FILENAME_EXT
+    	  
+    	  if [ -e "$DIR/$in_filename" ]; then
+      	  # Output filename
+        	# Must escape the %02d being passed on to ImageMagick
+        	printf -v out_filename "%s%s%s-%s%02d%02d%03d%%02d.%s" \
+        	  "$OUT_FILENAME_PREFIX" "$genotype" "$OUT_FILENAME_SUFFIX" \
+        	  "${OUT_FILENAME_CHANNEL[$channel]}" "$row" "$col" "$field" "$OUT_FILENAME_EXT"
+      	
+        	# Run ImageMagick on the tiff input file:
+        	#   - Normalize the 
+        	cmd="$IM_APP $DIR/$in_filename $IM_ALL_COMMANDS $out_dir/$out_filename"
+        	$cmd
+        fi
       done
     done
   done
 done
-
-#tiffcrop -U px -z 1,1,100,100:101,1,200,100:201,1,300,100 -e separate test.tif new
