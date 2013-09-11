@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 
-DIR=/Volumes/X2/KS_130826_MArep3
-NUM_FIELDS=40
-NUM_CHANNELS=2
-CSV_FILE='/Volumes/X2/plateID_384.csv'
-NUM_WELLS=384
+# This script converts a directory of large, sequential TIFF files to smaller
+# JPEGs, storing them in a directory structure, for use with CalMorph.
+
+# Defaults for Command Line Arguments (checked below)
+CSV_FILE= # The plate id file in .csv format
+DIR="." # The directory where the tiff images are stored
+NUM_WELLS=384 # The number of wells (384 or 96)
+NUM_CHANNELS=2 # The number of channels
+SEARCH_IN_DIR_FOR_CSV=false # Don't search DIR for .csv files by default
+
+NUM_FIELDS=40 # TD: compute on the fly
 
 # Input File Options
 IN_FILENAME_PREFIX='xy'
-IN_FILENAME_ZERO_PADDING=5 # Number of total digits, padded with 0s (switch to calculating)
-IN_FILENAME_CHANNEL_SEP='c'
-IN_FILENAME_EXT='tif' # must be an image type
+IN_FILENAME_ZERO_PADDING=5 # Number of total digits, padded with 0s (TD: switch to calculating)
+IN_FILENAME_CHANNEL_SEP='c' # This separates the sequence # from the channel #
+IN_FILENAME_EXT='tif' # Must be an image type
 IN_IMG_WIDTH=2560
 IN_IMG_HEIGHT=2160
 
@@ -18,7 +24,7 @@ IN_IMG_HEIGHT=2160
 OUT_FILENAME_PREFIX='' # e.g., '1_'
 OUT_FILENAME_SUFFIX='' # e.g., 'proc'
 OUT_FILENAME_CHANNEL=([1]=C [2]=D) # array mapping a channel to its CalMorph symbol
-OUT_FILENAME_EXT='jpg' # must be an image type
+OUT_FILENAME_EXT='jpg' # Must be an image type
 OUT_IMG_WIDTH=696
 OUT_IMG_HEIGHT=520
 OUT_IMG_DEPTH=8
@@ -33,34 +39,99 @@ IM_CONTRAST="-auto-level"
 IM_DEPTH="-depth $OUT_IMG_DEPTH"
 # We need to shave some pixels off the top and bottom to be able to evenly
 # divide it up. (We prefer shaving the edges.)
-# Some dark magick, but note that bash does int div and will truncate
+# Some dark "magick," but note that bash does int div and will truncate
+# TD: Explain (especially why it's rotated)
 IM_SHAVE="-shave 0x$(( (IN_IMG_HEIGHT - IN_IMG_HEIGHT/OUT_IMG_WIDTH * OUT_IMG_WIDTH)/2 ))"
+# TD: Explain
 IM_CROP="-crop 5x3+10+0@ +repage +adjoin"
+# TD: Explain rotation
 IM_ROTATE="-rotate 90"
 IM_ALL_COMMANDS="$IM_CONTRAST $IM_DEPTH $IM_SHAVE $IM_CROP $IM_ROTATE"
-IM_OUTPUT_FILE="test_5x3_ad_1_%02d.$OUT_FILENAME_EXT"
 
-# TO DO
+# TD
 #overlap=10
 # Add code to determine the padding
 # Do line conversion automatically
 # Fix ugly IM code and calculate tiling automatically
 
-# Default to 384 well plates
-NUM_ROWS=16
-NUM_COLS=24
-if [ $NUM_WELLS == 96 ]; then
-  NUM_ROWS=8
-  NUM_COLS=12
-fi
+# Check command line parameters
+while getopts ":d:w:c:p:Ph" opt; do
+  case $opt in
+    d)
+      DIR="$OPTARG"
+      ;;
+    w)
+      NUM_WELLS="$OPTARG"
+      ;;
+    c)
+      NUM_CHANNELS="$OPTARG"
+      ;;
+    p)
+      CSV_FILE="$OPTARG"
+      ;;
+    P)
+      SEARCH_IN_DIR_FOR_CSV=true # DIR may not be set correctly, so just flag
+      ;;
+    h)
+      echo "-h was triggered, Parameter: $OPTARG" >&2
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit 1
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      exit 1
+      ;;
+  esac
+done
+shift $(( OPTIND-1 )) # must shift the positional parameter set after getopts
 
-# Optionally take rows and cols on command line
+# Convert the number of wells to rows and columns
+case "$NUM_WELLS" in
+  96)
+    NUM_ROWS=8
+    NUM_COLS=12
+    ;;
+  384)
+    NUM_ROWS=16
+    NUM_COLS=24
+    ;;
+  *)
+    echo "Unknown \"number of wells\" argument. Expecting 384 or 96."
+    exit 1;
+    ;;
+esac
+
+# Check to see if our .csv is set
+if [ -z "$CSV_FILE" ]; then
+  # If not, try to grab it off the command line
+  if (( $# > 0 )); then
+    CSV_FILE="$1"
+  elif $SEARCH_IN_DIR_FOR_CSV; then # -P was passed
+    # If it's also not on the command line, we'll look for one in the file dir
+    echo "search code"
+    csvs=($DIR/*.csv)
+    if (( ${#csvs[@]} > 0 )); then
+      CSV_FILE=${csvs[0]}
+    else
+      # TD: print usage
+      echo "No .csv file was found."
+      exit 1
+    fi
+  else
+    # TD: print usage
+    echo "No .csv file was found."
+    exit 1
+  fi
+fi
 
 # Check for imagemagick and instruct otherwise
 # brew install imagemagic --with-libtiff
 
 # Read the .csv file into an array, first skipping the header row
 # and then grabbing the 3rd column.
+# Explain 1d array
 genotypes=( $(tail -n+2 $CSV_FILE | cut -d ',' -f3 ) )
 
 # Iterate through every well by row and col
@@ -70,8 +141,12 @@ do
   do
     # Lookup the genotype for this well by
     # mapping [row][col] to an index in our 1d array
-    genotype_index=$((NUM_COLS * row + col))
+    genotype_index=$(( NUM_COLS * row + col ))
     genotype=${genotypes[$genotype_index]}
+    
+    # Print status
+    completion_percentage=$(( 100 * (NUM_COLS * row + col) / (NUM_COLS * NUM_ROWS) ))
+    echo "Processing well ${row}x${col} ($completion_percentage%)"
     
     # Create an output directory if not already present
     out_dir="$DIR/$OUT_DIR_PREFIX$genotype$OUT_DIR_SUFFIX"
@@ -88,6 +163,8 @@ do
     # we are currently processing. This is dependent on row and col only,
     # so we pull this code out of the inner loop.
     
+    # TO DO: change to num_prev_wells
+    
     # First, start by counting the number of wells that come before it
     if [ $col == 0 ]; then
       # Still in the first column, so this is just the number of rows 
@@ -102,6 +179,7 @@ do
     	# which has already been counted)
     	(( num_wells += (NUM_ROWS-row-1) * (NUM_COLS-1) ))
 
+      # Explain even and zero indexing
     	if ! ((row % 2)); then
     		# If the row is even, we include every well after it
     		# (Microscope is heading back to the left.)
@@ -140,13 +218,33 @@ do
         	printf -v out_filename "%s%s%s-%s%02d%02d%03d%%02d.%s" \
         	  "$OUT_FILENAME_PREFIX" "$genotype" "$OUT_FILENAME_SUFFIX" \
         	  "${OUT_FILENAME_CHANNEL[$channel]}" "$row" "$col" "$field" "$OUT_FILENAME_EXT"
-      	
+      	  
+      	  # add check to see if file exists
+      	  
         	# Run ImageMagick on the tiff input file:
         	#   - Normalize the 
         	cmd="$IM_APP $DIR/$in_filename $IM_ALL_COMMANDS $out_dir/$out_filename"
         	$cmd
         fi
+        # warn if doesn't exist
       done
     done
   done
 done
+
+# chr() - converts decimal value to its ASCII character representation
+chr() {
+  printf \\$(printf '%03o' $1)
+}
+
+# ord() - converts ASCII character to its decimal value
+ord() {
+  printf '%d' "'$1"
+}
+
+#row_to_char() {
+  #A_ord=$(ord A)
+  #echo "$A_ord"
+  #row_ord=((  A_ord + $1 ))
+  #chr row_ord
+#}
