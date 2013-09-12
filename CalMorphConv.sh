@@ -35,7 +35,8 @@ OUT_DIR_SUFFIX='' # e.g., 'proc'
 
 # ImageMagick Options
 IM_APP="convert"
-IM_CONTRAST="-auto-level"
+IM_QUIET="-quiet"
+IM_CONTRAST="-evaluate Multiply 32" # "-auto-level"
 IM_DEPTH="-depth $OUT_IMG_DEPTH"
 # We need to shave some pixels off the top and bottom to be able to evenly
 # divide it up. (We prefer shaving the edges.)
@@ -46,13 +47,15 @@ IM_SHAVE="-shave 0x$(( (IN_IMG_HEIGHT - IN_IMG_HEIGHT/OUT_IMG_WIDTH * OUT_IMG_WI
 IM_CROP="-crop 5x3+10+0@ +repage +adjoin"
 # TD: Explain rotation
 IM_ROTATE="-rotate 90"
-IM_ALL_COMMANDS="$IM_CONTRAST $IM_DEPTH $IM_SHAVE $IM_CROP $IM_ROTATE"
+IM_ALL_COMMANDS="$IM_QUIET $IM_CONTRAST $IM_DEPTH $IM_SHAVE $IM_CROP $IM_ROTATE"
 
 # TD
 #overlap=10
 # Add code to determine the padding
 # Do line conversion automatically
 # Fix ugly IM code and calculate tiling automatically
+# Fix space in directories and filenames
+# Convert .csv file to proper line endings
 
 # Check command line parameters
 while getopts ":d:w:c:p:Ph" opt; do
@@ -225,8 +228,9 @@ do
         	#   - Normalize the 
         	cmd="$IM_APP $DIR/$in_filename $IM_ALL_COMMANDS $out_dir/$out_filename"
         	$cmd
+      	else
+      	  echo "$DIR/$in_filename does not exist. Well: ${row}x${col} Genotype: $genotype"
         fi
-        # warn if doesn't exist
       done
     done
   done
