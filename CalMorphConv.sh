@@ -3,9 +3,9 @@
 # This script converts a directory of large, sequential TIFF files into smaller
 # JPEGs, storing them in a directory structure, for use with CalMorph.
 
-#
+##
 # Defaults for Command Line Arguments (checked below)
-#
+##
 
 # CSV Defaults
 CSV_FILE= # The plate id file in .csv format (no default)
@@ -51,12 +51,17 @@ QUIET=false # Do not warn (e.g., when expected .tiff file is not found)
 
 # TD
 # Add code to determine the padding
-# Do line conversion automatically for .csv files
 # Fix ugly IM code and calculate tiling automatically
 # Preemptively bring files into the cache?
 # add histogram and auto-level switch, maybe as 'c' with different settings
 # move row,col => index to function
- 
+# add support for joe
+# add nice well printouts
+
+##
+# Command Line Usage and Parsing
+##
+
 usage() { 
   echo "
 Usage: $0 [-i input_directory] [-m cobra|joe] [-w 384|96] [options ...] [-p] plate_id.csv
@@ -79,8 +84,8 @@ Microscope Options
 
 Plate ID Options
   [-p] plate_id.csv     the plate id file (must be last argument w/t flag)
-  -P                    automatically search input_directory for a .csv
-                        plate id file (use in place of -p)
+  -P                    automatically search input_directory for a .csv plate
+                        id file (use in place of -p) (requires extension)
 
 GNU Parallel Options
   -j num_jobs           number of jobs to run in parallel (e.g., 3 or +4) ($NUM_JOBS)
@@ -176,6 +181,10 @@ while getopts ":i:a:o:A:Z:m:w:f:c:p:Pj:C:M:n:b:Oqvh" opt; do
 done
 shift $(( OPTIND-1 )) # must shift the positional parameter set after getopts
 
+##
+# Check for Required Programs
+##
+
 # Check for ImageMagick
 if ! hash convert 2>/dev/null; then
   echo "
@@ -207,6 +216,10 @@ even when using an external drive:
     exit 1
 fi
 
+##
+# Configure Settings
+##
+
 # Convert the number of wells to rows and columns
 case "$NUM_WELLS" in
   96)
@@ -222,28 +235,6 @@ case "$NUM_WELLS" in
     exit 1;
     ;;
 esac
-
-# Check to see if our .csv is set
-if [[ -z $CSV_FILE ]]; then
-  # If not, try to grab it off the command line
-  if (( $# > 0 )); then
-    CSV_FILE="$1"
-  elif $SEARCH_IN_DIR_FOR_CSV; then # -P was passed
-    # If it's also not on the command line, we'll look for one in the file dir
-    csvs=($IN_DIR/*.csv)
-    if (( ${#csvs[@]} > 0 )); then
-      CSV_FILE=${csvs[0]}
-    else
-      echo "No .csv plate ID file was found in $IN_DIR."
-      exit 1
-    fi
-  fi
-fi
-# Final check for .csv plate ID file
-if [[ -z $CSV_FILE || ! -f $CSV_FILE ]]; then
-  echo "No .csv plate ID file was found."
-  usage
-fi
 
 # Check if OUT_DIR is set and set to IN_DIR if not
 if [[ -z $OUT_DIR ]]; then
@@ -304,14 +295,47 @@ case "$CONTRAST" in
 esac
 #"-evaluate Multiply 32" # "-auto-level" "-normalize"
 
+##
+# Process CSV Plate ID File
+##
+
+# Check to see if our .csv is set from a "-p plate_ID.csv" switch
+if [[ -z $CSV_FILE ]]; then
+  # If not, try to grab it off the command line
+  if (( $# > 0 )); then
+    CSV_FILE="$1"
+  elif $SEARCH_IN_DIR_FOR_CSV; then # -P was passed
+    # If it's also not on the command line, we'll look for one in the file dir
+    csvs=($IN_DIR/*.csv)
+    if (( ${#csvs[@]} > 0 )); then
+      CSV_FILE=${csvs[0]}
+    else
+      echo "No .csv plate ID file was found in $IN_DIR."
+      echo "Does the plate id file not have a .csv extension?"
+      exit 1
+    fi
+  fi
+fi
+# Final check for .csv plate ID file
+if [[ -z $CSV_FILE || ! -f $CSV_FILE ]]; then
+  echo "No .csv plate ID file was found."
+  usage
+fi
+
+# Convert .csv line endings from CR (Mac Classic) or CRLF (Windows)
+# to LF (Mac/Unix). We do this because Excel on Mac saves .csv files
+# with CR line endings for some bizarre reason. (Just run it every
+# time.)
+perl -i -pe 's/\r\n?/\n/g' $CSV_FILE
+
 # Read the .csv file into an array, first skipping the header row
-# and then grabbing the 3rd column.
-# Explain 1d array
+# and then grabbing the 3rd column. This places all of our genotypes 
+# in a single array matching the column from the .csv file.
 genotypes=( $(tail -n+2 $CSV_FILE | cut -d ',' -f3 ) )
 
-#
-# Iterate through every well by row and col
-#
+##
+# Main Loop: Iterate through every well by row and col
+##
 for (( row=0; row < $NUM_ROWS; row++ ))
 do
   for (( col=0; col < $NUM_COLS; col++ ))
@@ -320,17 +344,20 @@ do
     completion_percentage=$(( 100 * (NUM_COLS * row + col) / (NUM_COLS * NUM_ROWS) ))
     echo "Processing well ${row}x${col} ($completion_percentage%)"
     
-    # Lookup the genotype for this well by
-    # mapping [row][col] to an index in our 1d array
+    # Look up the genotype for this well by mapping [row][col] to an index in
+    # our 1d array. This just maps the 2d matrix of rows and cols to our 1d
+    # list of genotypes.
     genotype_index=$(( NUM_COLS * row + col ))
     genotype=${genotypes[$genotype_index]}
     
     # Count the number of times we have already seen this genotype.
     # This is used to calculate the output filename's sequence # below.
+    # We do this because there can be multiple wells with the same genotype,
+    # but the output images for ALL wells must still be sequenced from 1 to N.
     num_prev_wells_of_same_genotype=0
     for (( gi=0; gi < $genotype_index; gi++ ))
     do
-      if [[ ${genotypes[gi]} = $genotype ]]; then
+      if [[ "${genotypes[gi]}" = "$genotype" ]]; then
         (( num_prev_wells_of_same_genotype++ ))
       fi
     done
@@ -349,8 +376,6 @@ do
     # We start by calculating the number of wells that are before the one
     # we are currently processing. This is dependent on row and col only,
     # so we pull this code out of the inner loop.
-    
-    # TO DO: change to num_prev_wells
     
     # First, start by counting the number of wells that come before it
     if (( $col == 0 )); then
@@ -417,17 +442,17 @@ do
         	  "${OUT_FILENAME_CHANNEL[$channel]}" "$OUT_FILENAME_EXT"
       	  
       	  # Check to see if the output files already exist and skip if they ALL do
+      	  # (Again, each input file becomes $im_num_out_imgs.)
       	  for (( seq=$seq_num; seq < $seq_num + $im_num_out_imgs; seq++ ))
           do
       	    printf -v out_filename_seq "$out_filename" $seq
       	    if [[ ! -f $out_dir/$out_filename_seq ]] || $OUT_OVERWRITE; then
           	  # Run ImageMagick's "convert" using GNU Parallel's "sem."
-          	  # This allows running up to $NUM_JOBS separate conversion
-          	  # in the background.
+          	  # This allows running up to $NUM_JOBS in the background.
             	sem -j "$NUM_JOBS" --id $$ -q convert "$IN_DIR/$in_filename" -quiet \
             	    -auto-level -depth $OUT_IMG_DEPTH "${im_process_image[@]}" \
             	    -scene $seq_num "$out_dir/$out_filename"
-            	break # IM will generate all im_num_out_imgs at the same time
+            	break # IM will generate all $im_num_out_imgs at the same time
             fi
           done
       	elif ! $QUIET; then
