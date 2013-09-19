@@ -14,7 +14,7 @@ SEARCH_IN_DIR_FOR_CSV=false # Don't search $IN_DIR for .csv files by default
 # Input File Defaults
 IN_DIR="." # The directory where the tiff images are stored (current dir)
 IN_FILENAME_PREFIX="xy"
-IN_FILENAME_ZERO_PADDING=5 # Number of total digits, padded with 0s (TD: switch to calculating)
+IN_FILENAME_NUM_DIGITS= # Number of total digits, padded with 0s (automatically calculated)
 IN_FILENAME_CHANNEL_SEP="c" # This separates the sequence # from the channel #
 IN_FILENAME_EXT="tif" # Must be an image type
 
@@ -24,15 +24,15 @@ OUT_GROUP_PREFIX="1_" # e.g., '1_' (also applied to genotype directory)
 OUT_GROUP_SUFFIX="proc" # e.g., 'proc' (also applied to genotype directory)
 OUT_FILENAME_CHANNEL=([1]=C [2]=D [3]=A) # array mapping a channel to its CalMorph symbol
 OUT_FILENAME_EXT="jpg" # Must be an image type
-OUT_IMG_WIDTH=696
-OUT_IMG_HEIGHT=520
+OUT_IMG_WIDTH=696   # Neither of these actually controls the output image size,
+OUT_IMG_HEIGHT=520  # which is handled by the microscope IM processing code.
 OUT_IMG_DEPTH=8
 OUT_OVERWRITE=false
 
 # Microscope Defaults
 MICROSCOPE="cobra" # The microscope being used (cobra, joe, or custom)
 NUM_WELLS=384 # The number of wells (384 or 96)
-NUM_FIELDS=40 # Usually computed based on input files
+NUM_FIELDS= # Usually computed based on input files
 NUM_CHANNELS=2 # The number of channels
 
 # Parallel Defaults
@@ -56,7 +56,6 @@ printWell() { # row, col
 }
 
 # TD
-# Add code to determine the padding and fields
 # add histogram and auto-level switch, maybe as 'c' with different settings
 
 ##
@@ -186,16 +185,16 @@ shift $(( OPTIND-1 )) # must shift the positional parameter set after getopts
 # Check for Required Programs
 ##
 
+missing_program=false
+
 # Check for ImageMagick
 if ! hash convert 2>/dev/null; then
   echo "
-This script requires ImageMagick to run. On Mac OS X, this can be
-installed using \"Homebrew\" (http://brew.sh, see one line install
-insruction toward the bottom of the page). With brew,
+This script requires ImageMagick (v6) to run. With brew,
 
   brew install imagemagick --with-libtiff
 
-Using jpeg-turbo (instead of jpeg) can further improve performance,
+Using jpeg-turbo (instead of jpeg) can improve performance,
 
   brew uninstall libtiff jpeg   (if either are installed)
   brew install jpeg-turbo
@@ -203,18 +202,26 @@ Using jpeg-turbo (instead of jpeg) can further improve performance,
   brew install libtiff
   brew install imagemagick --with-libtiff --without-jpeg
   " >&2
-  exit 1
+  missing_program=true
 fi
 
 # Check for GNU Parallel
 if ! hash sem 2>/dev/null; then
   echo "
-Installing GNU Parallel will generally improve performance,
-even when using an external drive:
+This script requires GNU Parallel, which will generally improve
+performance, even when using an external drive. With brew,
 
   brew install parallel
-    " >&2
-    exit 1
+  " >&2
+  missing_program=true
+fi
+
+if $missing_program; then
+  echo "
+On Mac OS X, \"Homebrew\" (http://brew.sh) can be installed with the
+single line at the bottom of its webpage.
+  " >&2
+  exit 1
 fi
 
 ##
@@ -287,6 +294,31 @@ case "$MICROSCOPE" in
     echo "Unknown microscope $MICROSCOPE. Expecting cobra, joe, or custom." >&2
     exit 1
 esac
+
+# Read input file list into an array for use in calculating the number of
+# fields and determining the amount of expected 0-padding.
+input_files=("$IN_DIR"/"$IN_FILENAME_PREFIX"*."$IN_FILENAME_EXT")
+
+# Automatically calculate the number of fields based on the # of files
+# in the input directory.
+if [[ -z $NUM_FIELDS ]]; then # user can override
+  num_input_files=${#input_files[@]}
+  NUM_FIELDS=$(( $num_input_files / $NUM_WELLS / $NUM_CHANNELS ))
+fi
+
+# Automatically calculate the amount of 0-padding used in input files.
+# This could also be done mathematically using $num_input_files; however,
+# looking directly at the number of characters is more robust, especially
+# when you only have a subset of files. Use a bash regular expression to
+# extract the digits component of the input filename.
+if [[ -z $IN_FILENAME_NUM_DIGITS && 
+  "${input_files[0]}" =~ $IN_FILENAME_PREFIX([[:digit:]]*)$IN_FILENAME_CHANNEL_SEP[[:digit:]]*\.$IN_FILENAME_EXT ]]; then
+  IN_FILENAME_NUM_DIGITS=${#BASH_REMATCH[1]} # once matched, count # of digit characters
+else
+  echo "Unexpected input filename format. Expecting,
+$IN_FILENAME_PREFIX[zero-padded digits]$IN_FILENAME_CHANNEL_SEP[digit for channel].$IN_FILENAME_EXT
+"
+fi
 
 # Configure ImageMagick contrast settings
 case "$CONTRAST" in
@@ -437,7 +469,7 @@ do
       # Construct the filename's base now since it's not dependent on the channel.
       # See http://wiki.bash-hackers.org/commands/builtin/printf#modifiers
       # for documentation on printf formatting.
-      printf -v in_basename "%s%0*d%s" $IN_FILENAME_PREFIX $IN_FILENAME_ZERO_PADDING \
+      printf -v in_basename "%s%0*d%s" $IN_FILENAME_PREFIX $IN_FILENAME_NUM_DIGITS \
           $(( num_prev_files + field )) $IN_FILENAME_CHANNEL_SEP
           
       # Calculate the output filename's sequence #:
