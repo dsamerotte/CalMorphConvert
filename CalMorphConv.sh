@@ -56,12 +56,8 @@ printWell() { # row, col
 }
 
 # TD
-# Add code to determine the padding
-# Preemptively bring files into the cache?
+# Add code to determine the padding and fields
 # add histogram and auto-level switch, maybe as 'c' with different settings
-# move row,col => index to function
-# add support for joe
-# add nice well printouts
 
 ##
 # Command Line Usage and Parsing
@@ -344,6 +340,47 @@ perl -i -pe 's/\r\n?/\n/g' $CSV_FILE
 genotypes=( $(tail -n+2 $CSV_FILE | cut -d ',' -f3 ) )
 
 ##
+# For any given well, return the number of previous wells the microscope has
+# processed. The microscope processes the first column first and then loops
+# back and forth through the remainder of the rows going from bottom to top.
+##
+num_prev_wells_for_well () { # row, col
+  row=$1
+  col=$2
+  local num_prev_wells=0
+  
+  if (( $col == 0 )); then
+    # Still in the first column, so this is just the number of rows 
+    # above the current well
+  	num_prev_wells=$row
+  else
+    # Already moved beyond the first column, so include it all
+  	num_prev_wells=$NUM_ROWS
+
+  	# Also include every row that's already been processed:
+  	# number of rows (except ours) * number of columns (except the first,
+  	# which has already been counted)
+  	(( num_prev_wells += (NUM_ROWS-row-1) * (NUM_COLS-1) ))
+
+    # We assume plates always have an even number of rows. We therefore know
+    # in which direction the microscope was moving for any given row based on
+    # whether that row is even or odd, BUT note that we use 0-indexing, which
+    # makes the first row 0 and the last row odd.
+  	if ! ((row % 2)); then
+  		# The row is even, so we include every well AFTER it
+  		# (Microscope is heading back to the left.)
+  		(( num_prev_wells += NUM_COLS-col-1 ))
+  	else
+  		# The row is odd, so we include every well BEFORE it,
+  		# except the first, which has already been counted
+  		# (Microscope is heading right.)
+  		(( num_prev_wells += col-1 ))
+  	fi
+  fi
+  echo $num_prev_wells
+}
+
+##
 # Main Loop: Iterate through every well by row and col
 ##
 for (( row=0; row < $NUM_ROWS; row++ ))
@@ -378,41 +415,15 @@ do
       mkdir -p "$out_dir"
     fi
 
-    # Map a row, col, field, and channel to a file.
-    # This is a bit strange as the microscope processes the first column
-    # first and then loops back and forth through the remainder of the rows
-    # going from bottom to top.
-    
-    # We start by calculating the number of wells that are before the one
-    # we are currently processing. This is dependent on row and col only,
-    # so we pull this code out of the inner loop.
-    
-    # First, start by counting the number of wells that come before it
-    if (( $col == 0 )); then
-      # Still in the first column, so this is just the number of rows 
-      # above the current well
-    	num_prev_wells=$row
-    else
-      # Already moved beyond the first column, so include it all
-    	num_prev_wells=$NUM_ROWS
+    ##
+    # We need to map a well to an input file name. The input files are
+    # sequential and based on the path the microscope took, not on the
+    # row and column layout of a plate.
+    ##
 
-    	# Also include every row that's already been processed:
-    	# number of rows (except ours) * number of columns (except the first,
-    	# which has already been counted)
-    	(( num_prev_wells += (NUM_ROWS-row-1) * (NUM_COLS-1) ))
-
-      # Explain even and zero indexing
-    	if ! ((row % 2)); then
-    		# The row is even, so we include every well AFTER it
-    		# (Microscope is heading back to the left.)
-    		(( num_prev_wells += NUM_COLS-col-1 ))
-    	else
-    		# The row is odd, so we include every well BEFORE it,
-    		# except the first, which has already been counted
-    		# (Microscope is heading right.)
-    		(( num_prev_wells += col-1 ))
-    	fi
-    fi
+    # Given the current well and based on the path of the microscope,
+    # determine how many previous wells we have seen.
+    num_prev_wells=$(num_prev_wells_for_well $row $col)
     
     # The number of previous files is then num_wells * the number
     # of files per well (NUM_FIELDS)
@@ -473,23 +484,6 @@ do
   done
 done
 sem --wait # join all threads
-
-# chr() - converts decimal value to its ASCII character representation
-chr() {
-  printf \\$(printf '%03o' $1)
-}
-
-# ord() - converts ASCII character to its decimal value
-ord() {
-  printf '%d' "'$1"
-}
-
-#row_to_char() {
-  #A_ord=$(ord A)
-  #echo "$A_ord"
-  #row_ord=((  A_ord + $1 ))
-  #chr row_ord
-#}
 
 clean_up() {
 	sem --wait # join all threads
