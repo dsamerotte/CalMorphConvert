@@ -48,10 +48,15 @@ CUSTOM_INPUT_BIT_DEPTH=
 
 # Misc Options
 QUIET=false # Do not warn (e.g., when expected .tiff file is not found)
+WELL_ROW_NAMES=({A..Z}) # rows are referenced by letter
+
+# Helper function for printing human readable wells
+printWell() { # row, col
+  echo "${WELL_ROW_NAMES[$1]}$(($2+1))"
+}
 
 # TD
 # Add code to determine the padding
-# Fix ugly IM code and calculate tiling automatically
 # Preemptively bring files into the cache?
 # add histogram and auto-level switch, maybe as 'c' with different settings
 # move row,col => index to function
@@ -247,7 +252,7 @@ im_num_out_imgs=1
 im_input_bit_depth=8
 case "$MICROSCOPE" in
   cobra)
-    in_img_width=2560
+    #in_img_width=2560
     in_img_height=2160
     # We need to shave some pixels off the top and bottom to be able to evenly
     # divide it up. (We prefer the interior to the edges.)
@@ -258,14 +263,19 @@ case "$MICROSCOPE" in
     im_process_image+=(-crop "5x3+10+0@")
     im_process_image+=(+repage)
     im_process_image+=(+adjoin)
-    # TD: Explain rotation
+    # TD: Explain rotation (and slightly faster)
     im_process_image+=(-rotate 90)
     im_num_out_imgs=15
     im_input_bit_depth=11
     ;;
   joe)
-    echo "Configuration settings for joe are incomplete." >&2
-    exit 1
+    #in_img_width=1392
+    #in_img_height=1040
+    im_process_image+=(-crop "2x2")
+    im_process_image+=(+repage)
+    im_process_image+=(+adjoin)
+    im_num_out_imgs=4
+    im_input_bit_depth=12
     ;;
   custom)
     if [[ ! -z $CUSTOM_IM && -z $CUSTOM_IM_NUM_OUTPUT_IMGS && ! -z $CUSTOM_INPUT_BIT_DEPTH ]]; then
@@ -342,7 +352,7 @@ do
   do
     # Print status (note: only integer arithmetic)
     completion_percentage=$(( 100 * (NUM_COLS * row + col) / (NUM_COLS * NUM_ROWS) ))
-    echo "Processing well ${row}x${col} ($completion_percentage%)"
+    echo "Processing well $(printWell $row $col) ($completion_percentage%)"
     
     # Look up the genotype for this well by mapping [row][col] to an index in
     # our 1d array. This just maps the 2d matrix of rows and cols to our 1d
@@ -456,7 +466,7 @@ do
             fi
           done
       	elif ! $QUIET; then
-      	  echo "File \"$IN_DIR/$in_filename\" does not exist (well: ${row}x${col}, genotype: $genotype)."
+      	  echo "File \"$IN_DIR/$in_filename\" does not exist (well: $(printWell $row $col), genotype: $genotype)."
         fi
       done
     done
@@ -481,7 +491,7 @@ ord() {
   #chr row_ord
 #}
 
-function clean_up {
+clean_up() {
 	sem --wait # join all threads
 	exit
 }
