@@ -22,7 +22,7 @@ IN_FILENAME_EXT="tif" # Must be an image type
 OUT_DIR= # Defaults to IN_DIR if not set (below after processing command line)
 OUT_GROUP_PREFIX="1_" # e.g., '1_' (also applied to genotype directory)
 OUT_GROUP_SUFFIX="proc" # e.g., 'proc' (also applied to genotype directory)
-OUT_FILENAME_CHANNEL=([1]=C [2]=D [3]=A) # array mapping a channel to its CalMorph symbol
+OUT_FILENAME_CHANNEL=([1]=C [2]=D [3]=A) # array mapping a channel to its CalMorph symbol (indexed to start at 1, not 0)
 OUT_FILENAME_EXT="jpg" # Must be an image type
 OUT_IMG_WIDTH=696   # Neither of these actually controls the output image size,
 OUT_IMG_HEIGHT=520  # which is handled by the microscope IM processing code.
@@ -36,10 +36,10 @@ NUM_FIELDS= # Usually computed based on input files
 NUM_CHANNELS=2 # The number of channels
 
 # Parallel Defaults
-NUM_JOBS="+0"
+NUM_JOBS="+0" # "+" is relative to the number of cores => jobs == # of cores
 
 # ImageMagick Defaults
-CONTRAST="none"
+CHANNEL_CONTRAST=([1]="auto" [2]="auto" [3]="auto") # default contrast values for each channel (indexed to start at 1, not 0)
 
 # Custom Microscope
 CUSTOM_IM=
@@ -55,8 +55,12 @@ printWell() { # row, col
   echo "${WELL_ROW_NAMES[$1]}$(($2+1))"
 }
 
-# TD
-# add histogram and auto-level switch, maybe as 'c' with different settings
+clean_up() {
+	sem --wait # join all threads
+	exit
+}
+
+trap clean_up SIGHUP SIGINT SIGTERM
 
 ##
 # Command Line Usage and Parsing
@@ -110,6 +114,7 @@ Misc Options
 }
 
 # Check command line parameters
+cl_channel_contrast=() # store any contrast arguments passed in
 while getopts ":i:a:o:A:Z:m:w:f:c:p:Pj:C:M:n:b:Oqvh" opt; do
   case $opt in
     i)
@@ -149,7 +154,7 @@ while getopts ":i:a:o:A:Z:m:w:f:c:p:Pj:C:M:n:b:Oqvh" opt; do
       NUM_JOBS="$OPTARG"
       ;;
     C)
-      echo "Got $OPTARG"
+      cl_channel_contrast+=($OPTARG)
       ;;
     M)
       CUSTOM_IM="$OPTARG"
@@ -252,7 +257,7 @@ fi
 # Configure settings based on microscope
 im_process_image=()
 im_num_out_imgs=1
-im_input_bit_depth=8
+im_input_bit_depth=11
 case "$MICROSCOPE" in
   cobra)
     #in_img_width=2560
@@ -281,19 +286,64 @@ case "$MICROSCOPE" in
     im_input_bit_depth=12
     ;;
   custom)
-    if [[ ! -z $CUSTOM_IM && -z $CUSTOM_IM_NUM_OUTPUT_IMGS && ! -z $CUSTOM_INPUT_BIT_DEPTH ]]; then
-      echo "When using a custom microscope, -M, -n, and -b must be passed."
-      exit 1
-    else
-      im_process_image="$CUSTOM_IMG"
-      im_num_out_imgs="$CUSTOM_IM_NUM_OUTPUT_IMGS"
-      im_input_bit_depth="$CUSTOM_INPUT_BIT_DEPTH"
-    fi
+    im_process_image="$CUSTOM_IMG"
+    im_num_out_imgs="$CUSTOM_IM_NUM_OUTPUT_IMGS"
+    im_input_bit_depth="$CUSTOM_INPUT_BIT_DEPTH"
     ;;
   *)
     echo "Unknown microscope $MICROSCOPE. Expecting cobra, joe, or custom." >&2
     exit 1
 esac
+
+# Configure ImageMagick contrast settings
+
+# Translates a contrast command line option into an ImageMagick command
+contrast_to_im () { # contrast, bit depth
+  case "$1" in
+    none)
+      con=32
+      echo "-evaluate Multiply $con"
+      ;;
+    auto)
+      echo "-auto-level"
+      ;;
+    norm)
+      echo "-normalize"
+      ;;
+    *)
+      echo "Invalid contrast option $1."
+      usage
+      ;;
+  esac
+}
+
+# If any contrast options were passed, there must be either 1 or $NUM_CHANNELS
+num_cl_channel_contrast=${#cl_channel_contrast[@]}
+if (( $num_cl_channel_contrast > 0 && $num_cl_channel_contrast != 1 && 
+      $num_cl_channel_contrast != $NUM_CHANNELS )); then
+    echo "
+Invalid number of channel contrast options passed: $num_cl_channel_contrast (must either be 1 or equal
+to the number of channels ($NUM_CHANNELS))." >&2
+    usage
+fi    
+
+# Create an array containing an ImageMagick command for every channel
+im_contrast_command_for_channel=() # will hold our final settings
+for (( i=1; i <= $NUM_CHANNELS; i++ ))
+do
+  case "$num_cl_channel_contrast" in
+    1)
+      contrast=${cl_channel_contrast[0]}
+      ;;
+    $NUM_CHANNELS)
+      contrast=${cl_channel_contrast[(($i-1))]} # 0-indexed
+      ;;
+    *)
+      contrast=${CHANNEL_CONTRAST[$i]} # 1-indexed
+      ;;
+  esac
+  im_contrast_command_for_channel[$i]=$(contrast_to_im $contrast)
+done
 
 # Read input file list into an array for use in calculating the number of
 # fields and determining the amount of expected 0-padding.
@@ -319,19 +369,6 @@ else
 $IN_FILENAME_PREFIX[zero-padded digits]$IN_FILENAME_CHANNEL_SEP[digit for channel].$IN_FILENAME_EXT
 "
 fi
-
-# Configure ImageMagick contrast settings
-case "$CONTRAST" in
-  none)
-    ;;
-  auto)
-    ;;
-  norm)
-    ;;
-  *)
-    ;;
-esac
-#"-evaluate Multiply 32" # "-auto-level" "-normalize"
 
 ##
 # Process CSV Plate ID File
@@ -503,8 +540,8 @@ do
           	  # Run ImageMagick's "convert" using GNU Parallel's "sem."
           	  # This allows running up to $NUM_JOBS in the background.
             	sem -j "$NUM_JOBS" --id $$ -q convert "$IN_DIR/$in_filename" -quiet \
-            	    -auto-level -depth $OUT_IMG_DEPTH "${im_process_image[@]}" \
-            	    -scene $seq_num "$out_dir/$out_filename"
+            	    ${im_contrast_command_for_channel[$channel]} -depth $OUT_IMG_DEPTH \
+            	    "${im_process_image[@]}" -scene $seq_num "$out_dir/$out_filename"
             	break # IM will generate all $im_num_out_imgs at the same time
             fi
           done
@@ -516,10 +553,3 @@ do
   done
 done
 sem --wait # join all threads
-
-clean_up() {
-	sem --wait # join all threads
-	exit
-}
-
-trap clean_up SIGHUP SIGINT SIGTERM
