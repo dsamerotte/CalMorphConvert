@@ -42,9 +42,9 @@ NUM_JOBS="+0" # "+" is relative to the number of cores => jobs == # of cores
 CHANNEL_CONTRAST=([1]="auto" [2]="auto" [3]="auto") # default contrast values for each channel (indexed to start at 1, not 0)
 
 # Custom Microscope
-CUSTOM_IM=
-CUSTOM_IM_NUM_OUTPUT_IMGS=
-CUSTOM_INPUT_BIT_DEPTH=
+CUSTOM_IM=() # must be array
+CUSTOM_IM_NUM_OUTPUT_IMGS=1
+CUSTOM_INPUT_BIT_DEPTH=11
 
 # Misc Options
 QUIET=false # Do not warn (e.g., when expected .tiff file is not found)
@@ -78,6 +78,7 @@ Input & Output Options
   -o output_directory   output directory for JPEGs (= input dir if not set)
   -A group_prefix       group prefix applied to output files and dirs ($OUT_GROUP_PREFIX)
   -Z group_suffix       group suffix applied to output files and dirs ($OUT_GROUP_SUFFIX)
+  -e extension          output file extension (must be an image type) ($OUT_FILENAME_EXT)
 
 Microscope Options
   -m cobra|joe|custom   specify microscope ($MICROSCOPE)
@@ -94,15 +95,26 @@ Plate ID Options
 GNU Parallel Options
   -j num_jobs           number of jobs to run in parallel (e.g., 3 or +4) ($NUM_JOBS)
 
-ImageMagick Options
-  -C none|auto|norm     specify contrast algorithm by channel
+Contrast Options
+  -C none|auto|norm     specify contrast algorithm by channel. Pass once to
+                        apply the option to all channels OR pass multiple
+                        times, exactly once for each channel in order.
+                        For example, assuming channels 1 & 2, -C auto -C norm
+                        
+    none:               no enhancement
+    auto:               linearly stretch from min and max values to full range
+                        (ImageMagick's -auto-level)
+    norm:               expand to full range, clipping 2% black and 1% white
+                        (ImageMagick's -normalize)
+                        See http://www.imagemagick.org/Usage/color_mods/
 
 Custom Microscope
-  -M custom_im          allows custom image cropping when microscope (-m)
-                        is \"custom\"
+  -M custom_im          allows passing multiple ImageMagick commands when 
+                        microscope (-m) is \"custom\"
+                        (e.g., -M '-crop 2x2@' -M '+repage +adjoin')
   -n custom_out_imgs    number of output images generated when microscope (-m)
-                        is \"custom\"
-  -b custom_bit_depth   custom bit depth when microscope (-m) is \"custom\"
+                        is \"custom\" ($CUSTOM_IM_NUM_OUTPUT_IMGS)
+  -b custom_bit_depth   custom bit depth when microscope (-m) is \"custom\" ($CUSTOM_INPUT_BIT_DEPTH)
 
 Misc Options
   -O                    overwrite output files
@@ -115,7 +127,7 @@ Misc Options
 
 # Check command line parameters
 cl_channel_contrast=() # store any contrast arguments passed in
-while getopts ":i:a:o:A:Z:m:w:f:c:p:Pj:C:M:n:b:Oqvh" opt; do
+while getopts ":i:a:o:A:Z:e:m:w:f:c:p:Pj:C:M:n:b:Oqvh" opt; do
   case $opt in
     i)
       IN_DIR="$OPTARG"
@@ -131,6 +143,9 @@ while getopts ":i:a:o:A:Z:m:w:f:c:p:Pj:C:M:n:b:Oqvh" opt; do
       ;;
     Z)
       OUT_GROUP_SUFFIX="$OPTARG"
+      ;;
+    e)
+      OUT_FILENAME_EXT="$OPTARG"
       ;;
     m)
       MICROSCOPE="$OPTARG"
@@ -157,7 +172,10 @@ while getopts ":i:a:o:A:Z:m:w:f:c:p:Pj:C:M:n:b:Oqvh" opt; do
       cl_channel_contrast+=($OPTARG)
       ;;
     M)
-      CUSTOM_IM="$OPTARG"
+      CUSTOM_IM+=($OPTARG)
+      ;;
+    n)
+      CUSTOM_IM_NUM_OUTPUT_IMGS="$OPTARG"
       ;;
     b)
       CUSTOM_INPUT_BIT_DEPTH="$OPTARG"
@@ -257,36 +275,60 @@ fi
 # Configure settings based on microscope
 im_process_image=()
 im_num_out_imgs=1
-im_input_bit_depth=11
+im_input_bit_depth=11 # actual bit-depth of data/microscope
+im_input_file_bit_depth=16 # file's bit-depth (almost always 8 or 16)
 case "$MICROSCOPE" in
   cobra)
-    #in_img_width=2560
+    #in_img_width=2560 # just for reference
     in_img_height=2160
-    # We need to shave some pixels off the top and bottom to be able to evenly
-    # divide it up. (We prefer the interior to the edges.)
-    # Some dark "magick," but note that bash does int div and will truncate
-    # TD: Explain (especially why it's rotated)
+    
+    # To maximize the number of smaller output images that we can cut out of
+    # the larger input image, we rotate our output image "cookie cutter,"
+    # cropping 520x696, instead of the 696x520 we need. As such, we must
+    # rotate the output images at the end. We also allow 10 pixels of overlap.
+    
+    # First, we need to shave some pixels off the top and bottom to evenly
+    # divide up the larger input image. (We prefer to shave the edges.)
+    # We take advantage of integer division (automatically truncates) to find 
+    # the number of times the smaller output image fits into the larger input
+    # image. From here we can easily find the number of leftover pixels, which
+    # we divide equally to take from the top and bottom.
+    # We divide by OUT_IMG_WIDTH because we are cutting out a rotated image.
     im_process_image+=(-shave 0x$(( (in_img_height - in_img_height/OUT_IMG_WIDTH * OUT_IMG_WIDTH)/2 )))
-    # TD: Explain
+
+    # Instead of cropping by 520x696 directly, we use ImageMagick's ability to
+    # crop into equally sized images using "@". This allows us to specify an
+    # overlap value, which does not appear to work with the other form.
+    # (Note, this is hard-coded for now.)
     im_process_image+=(-crop "5x3+10+0@")
+    
+    # Remove meta-data tracking where the image was originally from.
     im_process_image+=(+repage)
+    
+    # For the output of multiple output files, instead of storing in one file.
+    # (Note, this is done anyway for JPEG.)
     im_process_image+=(+adjoin)
-    # TD: Explain rotation (and slightly faster)
+    
+    # Again, because we're cropping out tall output images, we must rotate them
+    # for CalMorph. Testing shows that it is slightly faster to rotate the
+    # smaller images than it is to rotate the large image once, so we put the 
+    # -rotate after the -crop.
     im_process_image+=(-rotate 90)
-    im_num_out_imgs=15
-    im_input_bit_depth=11
+
+    im_num_out_imgs=15 # tell the sequencing code that we output 15 images
+    im_input_bit_depth=11 # tell the contrast code that this microscope has a bit depth of 11
     ;;
   joe)
     #in_img_width=1392
     #in_img_height=1040
-    im_process_image+=(-crop "2x2")
+    im_process_image+=(-crop "2x2@")
     im_process_image+=(+repage)
     im_process_image+=(+adjoin)
     im_num_out_imgs=4
     im_input_bit_depth=12
     ;;
   custom)
-    im_process_image="$CUSTOM_IMG"
+    im_process_image=("${CUSTOM_IM[@]}")
     im_num_out_imgs="$CUSTOM_IM_NUM_OUTPUT_IMGS"
     im_input_bit_depth="$CUSTOM_INPUT_BIT_DEPTH"
     ;;
@@ -301,13 +343,21 @@ esac
 contrast_to_im () { # contrast, bit depth
   case "$1" in
     none)
-      con=32
-      echo "-evaluate Multiply $con"
+      if (( $im_input_file_bit_depth > im_input_bit_depth)); then
+        # ImageMagick does not know and cannot be told that the image is actually
+        # only using 11 or 12 bits, so we must scale the image to 16 bits using multiply.
+        # To get the multiplier, we divide by the smaller bit depth (e.g., 
+        # 2^16/2^11 => 2^(16-11) => 1 << (16-11) (shifting 1 over 5 bits)).
+        bit_depth_multiplier=$(( 1 << (im_input_file_bit_depth - im_input_bit_depth) ))
+        echo "-evaluate Multiply $bit_depth_multiplier"
+      fi
       ;;
     auto)
+      # Automatically scales to full range, so no need to multiply as with none
       echo "-auto-level"
       ;;
     norm)
+      # Automatically scales to full range, so no need to multiply as with none
       echo "-normalize"
       ;;
     *)
