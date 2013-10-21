@@ -46,13 +46,30 @@ CUSTOM_IM=() # must be array
 CUSTOM_IM_NUM_OUTPUT_IMGS=1
 CUSTOM_INPUT_BIT_DEPTH=11
 
+# Also create directories organized by well (uses symlinks for JPEGs)
+WELL_EFFECTS=false
+WELL_EFFECTS_DIR="JPEGs by Well" # relative to output dir (for -W)
+
 # Misc Options
 QUIET=false # Do not warn (e.g., when expected .tiff file is not found)
 WELL_ROW_NAMES=({A..Z}) # rows are referenced by letter
 
 # Helper function for printing human readable wells
-printWell() { # row, col
+print_well() { # row, col
   echo "${WELL_ROW_NAMES[$1]}$(($2+1))"
+}
+
+# Helper function to get the relative path between two files or directories
+rel_path() {
+  # Older versions of python require both arguments to be directories
+  python -c "import os.path; print os.path.join(os.path.relpath(os.path.dirname('$1'), \
+      os.path.dirname('${2:-$PWD}')), os.path.basename('$1'))"
+  # python -c "import os.path; print os.path.relpath('$1','${2:-$PWD}')"
+}
+
+# Helper function to create relative sym links
+rel_link() {
+  ln -s $(rel_path "$1" "$2") "$2"
 }
 
 clean_up() {
@@ -79,6 +96,8 @@ Input & Output Options
   -A group_prefix       group prefix applied to output files and dirs ($OUT_GROUP_PREFIX)
   -Z group_suffix       group suffix applied to output files and dirs ($OUT_GROUP_SUFFIX)
   -e extension          output file extension (must be an image type) ($OUT_FILENAME_EXT)
+  -W                    create a subdirectory under the output directory with
+                        JPEGs organized by well using symlinks
 
 Microscope Options
   -m cobra|joe|custom   specify microscope ($MICROSCOPE)
@@ -127,7 +146,7 @@ Misc Options
 
 # Check command line parameters
 cl_channel_contrast=() # store any contrast arguments passed in
-while getopts ":i:a:o:A:Z:e:m:w:f:c:p:Pj:C:M:n:b:Oqvh" opt; do
+while getopts ":i:a:o:A:Z:e:m:w:Wf:c:p:Pj:C:M:n:b:Oqvh" opt; do
   case $opt in
     i)
       IN_DIR="$OPTARG"
@@ -152,6 +171,9 @@ while getopts ":i:a:o:A:Z:e:m:w:f:c:p:Pj:C:M:n:b:Oqvh" opt; do
       ;;
     w)
       NUM_WELLS="$OPTARG" # checked below
+      ;;
+    W)
+      WELL_EFFECTS=true
       ;;
     f)
       NUM_FIELDS="$OPTARG"
@@ -464,8 +486,8 @@ genotypes=( $(tail -n+2 $CSV_FILE | cut -d ',' -f3 ) )
 # back and forth through the remainder of the rows going from bottom to top.
 ##
 num_prev_wells_for_well () { # row, col
-  row=$1
-  col=$2
+  local row=$1
+  local col=$2
   local num_prev_wells=0
   
   if (( $col == 0 )); then
@@ -508,7 +530,7 @@ do
   do
     # Print status (note: only integer arithmetic)
     completion_percentage=$(( 100 * (NUM_COLS * row + col) / (NUM_COLS * NUM_ROWS) ))
-    echo "Processing well $(printWell $row $col) ($completion_percentage%)"
+    echo "Processing well $(print_well $row $col) ($completion_percentage%)"
     
     # Look up the genotype for this well by mapping [row][col] to an index in
     # our 1d array. This just maps the 2d matrix of rows and cols to our 1d
@@ -532,6 +554,12 @@ do
     out_dir="$OUT_DIR/$OUT_GROUP_PREFIX$genotype$OUT_GROUP_SUFFIX"
     if [[ ! -d $out_dir ]]; then
       mkdir -p "$out_dir"
+    fi
+    
+    # Create a well output directory if outputting JPEGs by well
+    if $WELL_EFFECTS; then
+      well_out_dir="$OUT_DIR/$WELL_EFFECTS_DIR/$(print_well $row $col)"
+      mkdir -p "$well_out_dir"
     fi
 
     ##
@@ -566,8 +594,8 @@ do
       # to be correct, we must tell IM where to start counting, which means
       # that we must calculate the number of output images that come before
       # the current image.
-      seq_num=$(( num_prev_wells_of_same_genotype*NUM_FIELDS*im_num_out_imgs + \
-        (field-1)*im_num_out_imgs + 1 ))
+      well_seq_num=$(( (field-1)*im_num_out_imgs + 1 ))
+      seq_num=$(( well_seq_num + num_prev_wells_of_same_genotype*NUM_FIELDS*im_num_out_imgs ))
       
       for (( channel=1; channel <= $NUM_CHANNELS; channel++ ))
       do
@@ -576,7 +604,7 @@ do
     	  
     	  # Check to see if the input file exists
     	  if [[ -f $IN_DIR/$in_filename ]]; then
-      	  # Output filename (must escape %d to pass to IM)
+      	  # Output filename (must escape %d to pass on to IM)
         	printf -v out_filename "%s%s%s-%s%%d.%s" \
         	  "$OUT_GROUP_PREFIX" "$genotype" "$OUT_GROUP_SUFFIX" \
         	  "${OUT_FILENAME_CHANNEL[$channel]}" "$OUT_FILENAME_EXT"
@@ -595,8 +623,21 @@ do
             	break # IM will generate all $im_num_out_imgs at the same time
             fi
           done
+          
+          # Create symlinks for wells if flag is passed (-W)
+          if $WELL_EFFECTS; then
+            for (( seq=$seq_num,well_seq=$well_seq_num; seq < $seq_num + $im_num_out_imgs; seq++,well_seq++ ))
+            do
+              printf -v out_filename_seq "$out_filename" $seq
+              printf -v well_out_filename_seq "$out_filename" $well_seq
+              if [[ ! -e "$well_out_dir/$well_out_filename_seq" ]]; then
+                rel_link "$out_dir/$out_filename_seq" "$well_out_dir/$well_out_filename_seq"
+              fi
+            done
+          fi
+
       	elif ! $QUIET; then
-      	  echo "File \"$IN_DIR/$in_filename\" does not exist (well: $(printWell $row $col), genotype: $genotype)."
+      	  echo "File \"$IN_DIR/$in_filename\" does not exist (well: $(print_well $row $col), genotype: $genotype)."
         fi
       done
     done
